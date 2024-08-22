@@ -1,0 +1,409 @@
+---
+title: "STA302 Part 1"
+author: "Yixiao Zhang"
+output: pdf_document
+---
+# The packages and the dataset 
+We are going to use datasets from the World Health Organization data repository.
+
+```{r, eval=TRUE, echo = T}
+library(rms)
+library(knitr)
+library(tidyverse)
+library(broom) ## Needed to make the regression output 'tidy'
+library(ggplot2)
+library(xtable)
+library(glmnet)
+library(car)
+library(Matrix)
+library(MPV)
+library(MASS)
+library(gglasso)
+library(pls)
+library(psych)
+library(ggpubr)
+```
+
+```{r}
+LED <- read.csv("Life_Expectancy_Data.csv", header = T)
+```
+
+Let's clean the data a bit:
+```{r}
+temp_data <- LED %>% dplyr::select(Country, Year, Life.expectancy, infant.deaths, Alcohol, Total.expenditure, BMI, HIV.AIDS)
+cleaned_data <- na.omit(temp_data)
+colnames(cleaned_data)[3] <- "LE"
+
+```
+Before we begin let's split the data 70/30 into training and testing:
+
+```{r}
+set.seed(1006787700)
+
+## use 70% as training 30% as test
+sample <- sample(c(TRUE, FALSE), nrow(cleaned_data), replace=TRUE, prob=c(0.7,0.3))
+train  <- cleaned_data[sample, ]
+test   <- cleaned_data[!sample, ]
+
+
+```
+
+```{r}
+library(ggplot2)
+# Let's begin by calculating and saving correlation matrix
+corr_matrix <- cor(cleaned_data[,4:8])
+
+# Melt correlation matrix to long format
+melted_correlation <- reshape2::melt(corr_matrix)
+
+melted_correlation
+
+# Next let's plot the correlation
+ggplot(data = melted_correlation) + 
+  geom_tile(aes(x = Var1, y = Var2, fill = value)) +
+  scale_fill_gradient2(low = "blue", high = "red", midpoint = 0, name = "Correlation") +
+  labs(title = "Correlation heatmap", subtitle = "Variables from cleaned dataset") +
+  xlab("Variable 1") + ylab("Variable 2") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1),
+        axis.text.y = element_text(angle = 0, vjust = 0.5, hjust=1),
+        panel.background = element_rect(fill = "white"),
+        panel.grid.major = element_line(colour = "gray90"),
+        panel.grid.minor = element_blank(),
+        legend.title = element_blank(),
+        legend.key.width = unit(1, "cm"),
+        legend.key.height = unit(0.5, "cm"),
+        legend.text = element_text(size = 10),
+        plot.title = element_text(size = 18, face = "bold"))
+```
+
+Residual plot:
+```{r}
+model <- lm(LE ~ infant.deaths + Alcohol + Total.expenditure + BMI + HIV.AIDS, data = train)
+hii <- hatvalues(model)
+which(hii > 4/nrow(train))
+## The standardized residuals ##
+r <- rstudent(model)
+which(r <= -2 | r >= 2)
+r[which(hii > 4/nrow(train))]
+
+### Plot using Base R ###
+par(family = 'serif')
+residual_plot <- plot(fitted(model), r, type = "p", xlab = "Fitted Values", ylab = "Standardized Residuals",
+     main = "Standardized Residuals", col = "blue")
+abline(h = 2, lty = 2)
+abline(h = -2, lty = 2)
+
+ggarrange(residual_plot, ncol = 2, nrow = 2)
+
+
+
+```
+
+QQplot:
+```{r}
+### Fit the model and get the levarage points ##
+
+plot(fitted(model), r, type = "p", xlab = "Fitted Values", ylab = "Standardized Residuals",
+     main = "Standardized Residuals", col = ifelse(r>=2 | r<=-2, "red", "blue"))
+abline(h = 2, lty = 2)
+abline(h = -2, lty = 2)
+text(fitted(model)[r>=2 | r<=-2]+0.5, r[r>=2 | r<=-2], labels = which(r <= -2 | r >= 2))
+
+### now that we observe the leverage points, we can clean the data by removing them: ##
+outliers <- which(r <= -2 | r >= 2)
+data_no_outliers <- cleaned_data[-outliers,]
+model_no_outliers <- lm(LE ~ infant.deaths + Alcohol + Total.expenditure + BMI + HIV.AIDS, data = data_no_outliers)
+fitted_no_outliers <- fitted(model_no_outliers)
+### model without outlier
+
+
+# qq plot
+r1 <- rstudent(model_no_outliers)
+p1 <- ggplot(data_no_outliers, aes(sample = r1)) + theme_minimal() 
+p1 + stat_qq() + stat_qq_line()
+
+# F - test:
+summary(model)
+
+# transformation
+boxcox(model, lambda = seq(-4, 4, 1/10) )
+boxcox(lm(infant.deaths + 1 ~ 1, data = train))
+boxcox(lm(Alcohol ~ 1, data = train))
+boxcox(lm(Total.expenditure ~ 1, data = train))
+boxcox(lm(BMI ~ 1, data = train))
+boxcox(lm(HIV.AIDS ~ 1, data = train))
+
+```
+So optimal lambda for life.expectancy, infant.deaths, Alcohol, Total.expenditure, BMI, HIV.AIDS are 2, -0.5, 0.5, 0.5, 1,  -0.5
+
+```{r}
+# Performing coxbox we have:
+life.expectancy_new <- (train$LE^2 - 1) / 2
+
+infant.deaths_new <- log(train$infant.deaths + 1)
+
+Alcohol_new <- (train$Alcohol^(0.5) - 1) * 2
+Total.expenditure_new <- (train$Total.expenditure^(0.5) - 1) * 2
+BMI_new <- (train$BMI - 1)
+HIV.AIDS_new <- ((train$HIV.AIDS)^(-0.5) - 1) * -2
+
+transformed_train <- data.frame(life.expectancy_new, infant.deaths_new, Alcohol_new, Total.expenditure_new, BMI_new, HIV.AIDS_new)
+
+model_transformed <- lm(life.expectancy_new ~ infant.deaths_new + Alcohol_new + Total.expenditure_new + BMI_new + HIV.AIDS_new, data = transformed_train)
+
+
+# residual plot 
+hii <- hatvalues(model_transformed)
+which(hii > 4/nrow(train))
+## The standardized residuals ##
+r <- rstudent(model_transformed)
+which(r <= -2 | r >= 2)
+r[which(hii > 4/nrow(train))]
+
+### Plot using Base R ###
+par(family = 'serif')
+plot(fitted(model_transformed), r, type = "p", xlab = "Fitted Values", ylab = "Standardized Residuals",
+     main = "Standardized Residuals", col = "blue")
+abline(h = 2, lty = 2)
+abline(h = -2, lty = 2)
+
+plot(fitted(model_transformed), r, type = "p", xlab = "Fitted Values", ylab = "Standardized Residuals",
+     main = "Standardized Residuals", col = ifelse(r>=2 | r<=-2, "red", "blue"))
+abline(h = 2, lty = 2)
+abline(h = -2, lty = 2)
+text(fitted(model)[r>=2 | r<=-2]+0.5, r[r>=2 | r<=-2], labels = which(r <= -2 | r >= 2))
+
+## remove outliers
+outliers <- which(r <= -2 | r >= 2)
+data_no_outliers <- train[-outliers,]
+
+## tranformation
+life.expectancy_new <- (data_no_outliers$LE^2 - 1) / 2
+
+infant.deaths_new <- (data_no_outliers$infant.deaths^(-0.5) - 1) * -2
+
+Alcohol_new <- (data_no_outliers$Alcohol^(0.5) - 1) * 2
+Total.expenditure_new <- (data_no_outliers$Total.expenditure^(0.5) - 1) * 2
+BMI_new <- (data_no_outliers$BMI - 1)
+HIV.AIDS_new <- (data_no_outliers$HIV.AIDS^(-0.5) - 1) * -2
+
+## fit the model to data without outliers:
+model_no_outliers <- lm(life.expectancy_new ~ infant.deaths + Alcohol_new + Total.expenditure_new + BMI_new + HIV.AIDS_new, data = data_no_outliers)
+fitted_no_outliers <- fitted(model_no_outliers)
+
+
+# qq plot
+r1 <- rstudent(model_no_outliers)
+p1 <- ggplot(data_no_outliers, aes(sample = r1)) + theme_minimal() 
+p1 + stat_qq() + stat_qq_line()
+
+
+
+```
+
+
+
+Given the 5 variables I choose in the proposal，we will make sure that none are greater than 5. 
+```{r}
+# VIF for all predictors 
+summary(model_transformed)
+v <- vif(model_transformed)
+
+
+
+# None of the variable has vif greater than 5 so this is good
+
+```
+Variable selection: aic, bic, lasso:
+
+```{r, eval=TRUE, echo = T}
+####### Variable selection #######
+# Performing boxcox we have:
+life.expectancy_new <- (train$LE^2 - 1) / 2
+
+
+infant.deaths_new <- (log(train$infant.deaths + 1) )
+
+Alcohol_new <- (train$Alcohol^(0.5) - 1) * 2
+Total.expenditure_new <- (train$Total.expenditure^(0.5) - 1) * 2
+BMI_new <- (train$BMI - 1)
+HIV.AIDS_new <- (train$HIV.AIDS^(-0.5) - 1) * -2
+variable <- data.frame(life.expectancy_new, infant.deaths_new, Alcohol_new, Total.expenditure_new, BMI_new, HIV.AIDS_new)
+## Step wise regression
+
+## Based on AIC ##
+model.lm <- lm(life.expectancy_new ~ Alcohol_new + Total.expenditure_new + BMI_new + HIV.AIDS_new, data = variable)
+summary(model.lm)  
+n <- nrow(train)
+sel.var.aic <- step(model.lm, trace = 0, k = 2, direction = "both") 
+sel.var.aic<-attr(terms(sel.var.aic), "term.labels")   
+sel.var.aic
+
+## Based on BIC ##
+model.lm <- lm(life.expectancy_new ~  Alcohol_new + Total.expenditure_new + BMI_new + HIV.AIDS_new, data = variable)
+summary(model.lm)   
+n <- nrow(variable)
+sel.var.bic <- step(model.lm, trace = 0, k = log(n), direction = "both") 
+sel.var.bic<-attr(terms(sel.var.bic), "term.labels")   
+sel.var.bic
+
+### LASSO selection 
+
+## Perform cross validation and choose lambda 
+set.seed(1006787700)
+cv.out <- cv.glmnet(x = as.matrix(variable), y = train$LE, standardize = T, alpha = 1)
+plot(cv.out)
+best.lambda <- cv.out$lambda.1se
+best.lambda
+co<-coef(cv.out, s = "lambda.1se")
+
+#Selection of the significant features(predictors)
+
+## threshold for variable selection
+
+thresh <- 0.00
+# select variables 
+inds<-which(abs(co) > thresh )
+variables<-row.names(co)[inds]
+sel.var.lasso<-variables[!(variables %in% '(Intercept)')]
+sel.var.lasso
+```
+
+
+```{r, eval=TRUE, echo = T}
+library(rms)
+set.seed(1006787700)
+
+### Based on AIC 
+ols.aic <- ols(life.expectancy_new ~ ., data = variable[,which(colnames(variable) %in% c(sel.var.aic, "life.expectancy_new"))], 
+               x=T, y=T, model = T)
+
+## 10 fold cross validation    
+aic.cross <- calibrate(ols.aic, method = "crossvalidation", B = 10)
+
+## Calibration plot
+plot(aic.cross, las = 1, xlab = "Predicted Life Expectancy", main = "Cross-Validation calibration with AIC")
+
+
+
+
+### Based on BIC 
+ols.bic <- ols(life.expectancy_new ~ ., variable[,which(colnames(variable) %in% c(sel.var.bic, "life.expectancy_new"))], 
+               x=T, y=T, model = T)
+
+## 10 fold cross validation    
+bic.cross <- calibrate(ols.bic, method = "crossvalidation", B = 10)
+## Calibration plot
+plot(bic.cross, las = 1, xlab = "Predicted Life Expectancy", main = "Cross-Validation calibration with BIC")
+
+### Based on Lasso 
+ols.lasso <- ols(life.expectancy_new ~ ., data = variable[,which(colnames(variable) %in% c(sel.var.bic, "life.expectancy_new"))], 
+                 x=T, y=T, model = T)
+
+## Cross validation 
+lasso.cross <- calibrate(ols.lasso, method = "crossvalidation", B = 10)
+## Calibration plot
+plot(lasso.cross, las = 1, xlab = "Predicted Life Expectancy", main = "Cross-Validation calibration with LASSO")
+
+
+## Calculate Train Error 
+pred.aic <- predict(ols.aic, newdata = variable[,which(colnames(variable) %in% c(sel.var.aic, "life.expectancy_new"))])
+## Prediction error 
+AIC_prediction_error <- mean((variable$life.expectancy_new - pred.aic)^2)
+AIC_prediction_error
+
+
+## Calculate Train Error 
+pred.bic <- predict(ols.bic, newdata = variable[,which(colnames(variable) %in% c(sel.var.bic, "life.expectancy_new"))])
+## Prediction error ##
+BIC_prediction_error <- mean((variable$life.expectancy_new - pred.bic)^2)
+BIC_prediction_error
+
+
+## Calculate Train Error 
+pred.lasso <- predict(ols.lasso, newdata = variable[,which(colnames(variable) %in% c(sel.var.lasso, "life.expectancy_new"))])
+## Prediction error 
+lasso_prediction_error <- mean((variable$life.expectancy_new - pred.lasso)^2)
+lasso_prediction_error
+
+```
+lasso has the lowest abs mean error, however, it might be overly simplistic with just two predictors, so I will choose bic
+
+```{r}
+
+## Check assumptions
+
+
+model <- lm(life.expectancy_new ~ ., variable[,which(colnames(variable) %in% c(sel.var.bic, "life.expectancy_new"))]) 
+## Calculate h_ii ##
+hii <- hatvalues(model)
+
+## Identify the leverages & bad leverage points ##
+r <- rstudent(model)
+bad_leverage_point <-which(r <= -2 | r >= 2)
+
+
+## Standardized residuals ##
+r <- rstudent(model)
+
+## Checking assumptions
+plot(fitted(model), r, type = "p", xlab = "Life Expectancy After Transformation", ylab = "Standardized Residuals",
+     main = "Standardized Residuals", col = ifelse(r>=2 | r<=-2, "red", "blue"),ylim=range(-5,5))
+abline(h = 2, lty =2)
+abline(h = -2, lty = 2)
+
+qqnorm(rstudent(model),col = "blue")
+qqline(rstudent(model))
+
+# Vif values:
+vif_values <- vif(model)
+vif_values
+
+
+pairs(variable[,which(colnames(variable) %in% c(sel.var.bic, "life.expectancy_new"))],col = "blue", main = "Pairs plot")
+
+```
+Now we remove outliers and refit the model
+```{r}
+data_no_outliers <- variable[-bad_leverage_point,]
+final_model <- lm(life.expectancy_new ~ ., variable[,which(colnames(variable) %in% c(sel.var.bic, "life.expectancy_new"))]) 
+
+#output the model:
+summary(final_model)
+
+## Test Error ##
+
+##First transform the test data:
+life.expectancy_new <- (test$LE^2 - 1) / 2
+
+
+infant.deaths_new <- (log(test$infant.deaths + 1) )
+
+Alcohol_new <- (test$Alcohol^(0.5) - 1) * 2
+Total.expenditure_new <- (test$Total.expenditure^(0.5) - 1) * 2
+BMI_new <- (test$BMI - 1)
+HIV.AIDS_new <- (test$HIV.AIDS^(-0.5) - 1) * -2
+
+test_transformed <- data.frame(life.expectancy_new, infant.deaths_new, Alcohol_new, Total.expenditure_new, BMI_new, HIV.AIDS_new)
+
+## make prediction
+
+pred <- predict(final_model, newdata = test_transformed[,which(colnames(test_transformed) %in% c(sel.var.bic, "life.expectancy_new"))])
+## Prediction error 
+test_error <- mean((test_transformed$life.expectancy_new - pred)^2)
+
+
+table <- matrix(c(BIC_prediction_error, test_error), nrow = 1)
+colnames(table)<- list("BIC - Training Pred error", "BIC - Test Pred error")
+rownames(table)<- "Prediction Error"
+
+kable(table, caption = "Training vs Test prediction error"
+        )
+```
+
+
+
+
+
+
+
